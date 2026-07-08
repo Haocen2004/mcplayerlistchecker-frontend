@@ -1,6 +1,6 @@
 import type { Document } from "mongodb";
 import { getDb } from "./mongo";
-import type { HistoryPoint, PlayerEvent } from "./types";
+import type { HistoryPoint, PlayerEvent, PlayerSession } from "./types";
 
 const RANGES = {
   "15m": 15 * 60 * 1000,
@@ -23,6 +23,14 @@ export type BucketKey = keyof typeof BUCKETS | "auto";
 export type TimeWindow =
   | { mode: "range"; range: RangeKey; start: Date; end: Date }
   | { mode: "custom"; range: "custom"; start: Date; end: Date };
+type NormalizedLogEvent = {
+  id: string;
+  type: "join" | "leave";
+  uuid: string;
+  username: string;
+  server: string;
+  timestamp: Date;
+};
 
 export function normalizeRange(value: string | null): RangeKey {
   return isRange(value) ? value : "1h";
@@ -92,8 +100,7 @@ export async function getHistory(params: {
     tpsCount: number;
     msptSum: number;
     msptCount: number;
-    playerCountSum: number;
-    playerCountCount: number;
+    playerCountLast: number | null;
   }>();
 
   for (const row of rows) {
@@ -107,14 +114,14 @@ export async function getHistory(params: {
       tpsCount: 0,
       msptSum: 0,
       msptCount: 0,
-      playerCountSum: 0,
-      playerCountCount: 0
+      playerCountLast: null
     };
 
     current.samples += 1;
     addNumber(current, "tps", row.tps);
     addNumber(current, "mspt", row.mspt);
-    addNumber(current, "playerCount", row.playerCount);
+    const playerCount = toNumber(row.playerCount);
+    if (playerCount !== null) current.playerCountLast = playerCount;
     buckets.set(bucketTime, current);
   }
 
@@ -124,7 +131,7 @@ export async function getHistory(params: {
       timestamp: new Date(timestamp).toISOString(),
       tps: averageOrNull(bucket.tpsSum, bucket.tpsCount),
       mspt: averageOrNull(bucket.msptSum, bucket.msptCount),
-      playerCount: averageOrNull(bucket.playerCountSum, bucket.playerCountCount),
+      playerCount: bucket.playerCountLast,
       samples: bucket.samples
     }));
 }
@@ -151,6 +158,106 @@ export async function getEvents(params: {
     server: row.server,
     timestamp: row.timestamp.toISOString()
   }));
+}
+
+export async function getPlayerSessions(params: {
+  server?: string | null;
+  window: TimeWindow;
+}): Promise<PlayerSession[]> {
+  const db = await getDb();
+  const serverMatch: Document = {};
+  if (params.server) serverMatch.server = params.server;
+
+  const [beforeRows, windowRows] = await Promise.all([
+    db.collection("logs")
+      .find({ ...serverMatch, timestamp: { $lt: params.window.start } }, {
+        projection: {
+          type: 1,
+          uuid: 1,
+          username: 1,
+          server: 1,
+          timestamp: 1
+        }
+      })
+      .sort({ timestamp: -1 })
+      .limit(5000)
+      .toArray(),
+    db.collection("logs")
+      .find({ ...serverMatch, timestamp: { $gte: params.window.start, $lte: params.window.end } }, {
+        projection: {
+          type: 1,
+          uuid: 1,
+          username: 1,
+          server: 1,
+          timestamp: 1
+        }
+      })
+      .sort({ timestamp: 1 })
+      .limit(10000)
+      .toArray()
+  ]);
+
+  const active = new Map<string, {
+    uuid: string;
+    username: string;
+    server: string;
+    start: Date;
+  }>();
+  const lastBefore = new Map<string, Document>();
+
+  for (const row of beforeRows) {
+    const key = eventKey(row);
+    if (!key || lastBefore.has(key)) continue;
+    lastBefore.set(key, row);
+  }
+
+  for (const row of lastBefore.values()) {
+    if (row.type !== "join") continue;
+    const normalized = normalizeLogEvent(row);
+    if (!normalized) continue;
+    active.set(eventKey(normalized)!, {
+      uuid: normalized.uuid,
+      username: normalized.username,
+      server: normalized.server,
+      start: params.window.start
+    });
+  }
+
+  const sessions: PlayerSession[] = [];
+  for (const row of windowRows) {
+    const event = normalizeLogEvent(row);
+    if (!event) continue;
+
+    const key = eventKey(event)!;
+    if (event.type === "join") {
+      if (!active.has(key)) {
+        active.set(key, {
+          uuid: event.uuid,
+          username: event.username,
+          server: event.server,
+          start: event.timestamp
+        });
+      }
+      continue;
+    }
+
+    const session = active.get(key);
+    if (!session) continue;
+    sessions.push(toPlayerSession(session, event.timestamp, false));
+    active.delete(key);
+  }
+
+  for (const session of active.values()) {
+    sessions.push(toPlayerSession(session, params.window.end, true));
+  }
+
+  return sessions
+    .filter(session => new Date(session.end) > new Date(session.start))
+    .sort((left, right) => {
+      const nameOrder = left.username.localeCompare(right.username);
+      if (nameOrder !== 0) return nameOrder;
+      return new Date(left.start).getTime() - new Date(right.start).getTime();
+    });
 }
 
 export async function getServers(): Promise<string[]> {
@@ -215,10 +322,8 @@ function addNumber(
     tpsCount: number;
     msptSum: number;
     msptCount: number;
-    playerCountSum: number;
-    playerCountCount: number;
   },
-  key: "tps" | "mspt" | "playerCount",
+  key: "tps" | "mspt",
   value: unknown
 ) {
   const parsed = toNumber(value);
@@ -230,13 +335,45 @@ function addNumber(
   } else if (key === "mspt") {
     bucket.msptSum += parsed;
     bucket.msptCount += 1;
-  } else {
-    bucket.playerCountSum += parsed;
-    bucket.playerCountCount += 1;
   }
 }
 
 function averageOrNull(sum: number, count: number): number | null {
   if (count === 0) return null;
   return Math.round((sum / count) * 100) / 100;
+}
+
+function normalizeLogEvent(row: Document): NormalizedLogEvent | null {
+  const timestamp = toDate(row.timestamp);
+  if (!timestamp || (row.type !== "join" && row.type !== "leave")) return null;
+
+  return {
+    id: String(row._id || `${row.uuid}-${timestamp.getTime()}`),
+    type: row.type,
+    uuid: String(row.uuid || ""),
+    username: String(row.username || row.uuid || "unknown"),
+    server: String(row.server || "default"),
+    timestamp
+  };
+}
+
+function eventKey(row: Document | { uuid: string; server: string }): string | null {
+  if (!row.uuid) return null;
+  return `${String(row.server || "default")}:${String(row.uuid)}`;
+}
+
+function toPlayerSession(
+  session: { uuid: string; username: string; server: string; start: Date },
+  end: Date,
+  open: boolean
+): PlayerSession {
+  return {
+    id: `${session.server}:${session.uuid}:${session.start.getTime()}:${end.getTime()}`,
+    uuid: session.uuid,
+    username: session.username,
+    server: session.server,
+    start: session.start.toISOString(),
+    end: end.toISOString(),
+    open
+  };
 }

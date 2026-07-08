@@ -26,7 +26,7 @@ import {
   XAxis,
   YAxis
 } from "recharts";
-import type { HistoryPoint, LiveMessage, Player, PlayerEvent, ServerStatus } from "@/lib/types";
+import type { HistoryPoint, LiveMessage, Player, PlayerEvent, PlayerSession, ServerStatus } from "@/lib/types";
 
 const ranges = [
   { value: "15m", label: "15 分钟" },
@@ -64,6 +64,8 @@ export function Dashboard() {
   const [theme, setTheme] = useState<Theme>("light");
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [events, setEvents] = useState<PlayerEvent[]>([]);
+  const [sessions, setSessions] = useState<PlayerSession[]>([]);
+  const [dataWindow, setDataWindow] = useState<{ start: string; end: string } | null>(null);
   const [historyError, setHistoryError] = useState("");
   const [loadingHistory, setLoadingHistory] = useState(false);
   const reconnectTimer = useRef<number | null>(null);
@@ -159,21 +161,28 @@ export function Dashboard() {
 
     try {
       const query = buildHistoryQuery();
-      const [historyResponse, eventsResponse] = await Promise.all([
+      const [historyResponse, eventsResponse, sessionsResponse] = await Promise.all([
         fetch(`/api/history?${query}`, { cache: "no-store" }),
-        fetch(`/api/events?${query}`, { cache: "no-store" })
+        fetch(`/api/events?${query}`, { cache: "no-store" }),
+        fetch(`/api/sessions?${query}`, { cache: "no-store" })
       ]);
 
       const historyBody = await historyResponse.json();
       const eventsBody = await eventsResponse.json();
+      const sessionsBody = await sessionsResponse.json();
       if (!historyResponse.ok || !historyBody.ok) throw new Error(historyBody.error || "历史数据读取失败");
       if (!eventsResponse.ok || !eventsBody.ok) throw new Error(eventsBody.error || "事件数据读取失败");
+      if (!sessionsResponse.ok || !sessionsBody.ok) throw new Error(sessionsBody.error || "在线时长读取失败");
 
       setHistory(historyBody.data);
       setEvents(eventsBody.data);
+      setSessions(sessionsBody.data);
+      setDataWindow({ start: historyBody.start, end: historyBody.end });
     } catch (error) {
       setHistory([]);
       setEvents([]);
+      setSessions([]);
+      setDataWindow(null);
       setHistoryError(error instanceof Error ? error.message : "历史数据读取失败");
     } finally {
       setLoadingHistory(false);
@@ -375,10 +384,19 @@ export function Dashboard() {
           </div>
         </div>
         <div className="panel p-4">
-          <ChartHeader title="在线人数" loading={loadingHistory} />
+          <ChartHeader title="在线人数采样" loading={loadingHistory} />
           <div className="small-chart-box">
             {history.length ? <PlayersChart data={history} /> : <EmptyChart />}
           </div>
+        </div>
+      </section>
+
+      <section className="panel mb-5 p-4">
+        <ChartHeader title="在线时长追踪" loading={loadingHistory} />
+        <div className="sessions-chart-box">
+          {sessions.length && dataWindow
+            ? <OnlineSessionsChart sessions={sessions} windowStart={dataWindow.start} windowEnd={dataWindow.end} showServer={!selectedServer} />
+            : <EmptyChart />}
         </div>
       </section>
 
@@ -495,6 +513,64 @@ function PlayersChart({ data }: { data: HistoryPoint[] }) {
   );
 }
 
+function OnlineSessionsChart({
+  sessions,
+  windowStart,
+  windowEnd,
+  showServer
+}: {
+  sessions: PlayerSession[];
+  windowStart: string;
+  windowEnd: string;
+  showServer: boolean;
+}) {
+  const startMs = new Date(windowStart).getTime();
+  const endMs = new Date(windowEnd).getTime();
+  const spanMs = Math.max(endMs - startMs, 1);
+  const groups = groupSessions(sessions, showServer);
+  const ticks = buildTicks(startMs, endMs, 6);
+
+  return (
+    <div className="session-chart">
+      <div className="session-axis-row">
+        <div className="session-label-spacer" />
+        <div className="session-timeline">
+          {ticks.map(tick => (
+            <div key={tick.value} className="session-tick" style={{ left: `${tick.left}%` }}>
+              <span>{formatTime(new Date(tick.value).toISOString())}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="session-rows">
+        {groups.map(group => (
+          <div key={group.key} className="session-row">
+            <div className="session-label" title={group.label}>{group.label}</div>
+            <div className="session-track">
+              {ticks.map(tick => <span key={tick.value} className="session-grid-line" style={{ left: `${tick.left}%` }} />)}
+              {group.sessions.map(session => {
+                const sessionStart = Math.max(new Date(session.start).getTime(), startMs);
+                const sessionEnd = Math.min(new Date(session.end).getTime(), endMs);
+                const left = ((sessionStart - startMs) / spanMs) * 100;
+                const width = Math.max(((sessionEnd - sessionStart) / spanMs) * 100, 0.5);
+                const title = `${group.label}\n${formatDateTime(session.start)} - ${formatDateTime(session.end)}\n${formatDuration(sessionEnd - sessionStart)}${session.open ? "，仍在线" : ""}`;
+                return (
+                  <span
+                    key={session.id}
+                    className={session.open ? "session-bar session-bar-open" : "session-bar"}
+                    style={{ left: `${left}%`, width: `${width}%` }}
+                    title={title}
+                  />
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function EmptyChart() {
   return (
     <div className="grid h-full place-items-center rounded-md border border-dashed border-slate-300 text-sm text-slate-500">
@@ -528,6 +604,46 @@ function formatDateTime(value: string) {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit"
+  });
+}
+
+function formatDuration(value: number) {
+  const totalSeconds = Math.max(Math.round(value / 1000), 0);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours} 小时 ${minutes} 分钟`;
+  if (minutes > 0) return `${minutes} 分钟 ${seconds} 秒`;
+  return `${seconds} 秒`;
+}
+
+function groupSessions(sessions: PlayerSession[], showServer: boolean) {
+  const groups = new Map<string, { key: string; label: string; sessions: PlayerSession[] }>();
+
+  for (const session of sessions) {
+    const key = `${session.server}:${session.uuid}`;
+    const label = showServer ? `${session.username} · ${session.server}` : session.username;
+    const group = groups.get(key) || { key, label, sessions: [] };
+    group.sessions.push(session);
+    groups.set(key, group);
+  }
+
+  return Array.from(groups.values())
+    .map(group => ({
+      ...group,
+      sessions: group.sessions.sort((left, right) => new Date(left.start).getTime() - new Date(right.start).getTime())
+    }))
+    .sort((left, right) => left.label.localeCompare(right.label));
+}
+
+function buildTicks(startMs: number, endMs: number, count: number) {
+  const spanMs = Math.max(endMs - startMs, 1);
+  return Array.from({ length: count }, (_, index) => {
+    const value = startMs + (spanMs * index) / (count - 1);
+    return {
+      value,
+      left: ((value - startMs) / spanMs) * 100
+    };
   });
 }
 

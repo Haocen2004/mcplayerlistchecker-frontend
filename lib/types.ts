@@ -41,6 +41,16 @@ export interface PlayerEvent {
   timestamp: string;
 }
 
+export interface PlayerSession {
+  id: string;
+  uuid: string;
+  username: string;
+  server: string;
+  start: string;
+  end: string;
+  open: boolean;
+}
+
 export interface LiveMessage {
   type: string;
   status?: ServerStatus;
