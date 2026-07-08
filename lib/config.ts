@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { randomBytes } from "node:crypto";
 
 interface RootConfig {
   apiPort?: number;
@@ -36,7 +37,7 @@ export function getFrontendConfig(): FrontendConfig {
     botWsUrl,
     authUser: process.env.FRONTEND_AUTH_USER || "admin",
     authPassword: process.env.FRONTEND_AUTH_PASSWORD || "admin",
-    jwtSecret: process.env.FRONTEND_JWT_SECRET || "change-this-secret-before-exposing-the-dashboard"
+    jwtSecret: process.env.FRONTEND_JWT_SECRET || getOrCreateJwtSecret()
   };
 
   if (!process.env.FRONTEND_AUTH_PASSWORD) {
@@ -44,6 +45,32 @@ export function getFrontendConfig(): FrontendConfig {
   }
 
   return cachedConfig;
+}
+
+function getOrCreateJwtSecret(): string {
+  const secretFile = path.resolve(process.env.FRONTEND_JWT_SECRET_FILE || ".frontend_jwt_secret");
+
+  try {
+    if (fs.existsSync(secretFile)) {
+      const existing = fs.readFileSync(secretFile, "utf8").trim();
+      if (existing) return existing;
+    }
+
+    const secret = toBase64Url(randomBytes(48));
+    fs.writeFileSync(secretFile, `${secret}\n`, { mode: 0o600 });
+    console.warn(`[Auth] FRONTEND_JWT_SECRET is not set; generated ${secretFile}. Keep this file private and persistent.`);
+    return secret;
+  } catch (error) {
+    throw new Error(`Failed to initialize JWT secret at ${secretFile}: ${(error as Error).message}`);
+  }
+}
+
+function toBase64Url(buffer: Buffer): string {
+  return buffer
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
 }
 
 function numberFromEnv(name: string, fallback: number): number {
