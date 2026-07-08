@@ -1,0 +1,136 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --panel-soft: #eef2f6;
+  --text: #151922;
+  --muted: #687282;
+  --line: #d8dee8;
+  --good: #15803d;
+  --warn: #b45309;
+  --bad: #b91c1c;
+  --blue: #2563eb;
+  --teal: #0f766e;
+  --teal-fill: #ccfbf1;
+}
+
+html[data-theme="dark"] {
+  --bg: #0f1218;
+  --panel: #171b23;
+  --panel-soft: #222834;
+  --text: #e8edf5;
+  --muted: #9aa5b5;
+  --line: #303847;
+  --good: #4ade80;
+  --warn: #fbbf24;
+  --bad: #f87171;
+  --blue: #60a5fa;
+  --teal: #2dd4bf;
+  --teal-fill: #134e4a;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: Arial, Helvetica, sans-serif;
+  letter-spacing: 0;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+input,
+select {
+  color: var(--text);
+}
+
+html[data-theme="dark"] .bg-white {
+  background-color: var(--panel) !important;
+}
+
+html[data-theme="dark"] .bg-slate-900 {
+  background-color: #e8edf5 !important;
+  color: #0f1218 !important;
+}
+
+html[data-theme="dark"] .bg-red-50 {
+  background-color: #35191d !important;
+}
+
+html[data-theme="dark"] .border-slate-200,
+html[data-theme="dark"] .border-slate-300,
+html[data-theme="dark"] .border-red-200 {
+  border-color: var(--line) !important;
+}
+
+html[data-theme="dark"] .border-dashed {
+  border-color: #3b4555 !important;
+}
+
+html[data-theme="dark"] .text-slate-900,
+html[data-theme="dark"] .text-slate-800,
+html[data-theme="dark"] .text-slate-700,
+html[data-theme="dark"] .text-slate-600 {
+  color: var(--text) !important;
+}
+
+html[data-theme="dark"] .text-slate-500 {
+  color: var(--muted) !important;
+}
+
+html[data-theme="dark"] .text-green-700 {
+  color: var(--good) !important;
+}
+
+html[data-theme="dark"] .text-amber-700 {
+  color: var(--warn) !important;
+}
+
+html[data-theme="dark"] .text-red-700,
+html[data-theme="dark"] .text-red-800 {
+  color: var(--bad) !important;
+}
+
+.metric {
+  min-height: 112px;
+}
+
+.chart-box {
+  height: 310px;
+}
+
+.small-chart-box {
+  height: 230px;
+}
+
+.status-dot {
+  width: 0.625rem;
+  height: 0.625rem;
+  border-radius: 999px;
+  display: inline-block;
+}
+
+.text-fit {
+  overflow-wrap: anywhere;
+}
