@@ -217,7 +217,7 @@ html[data-theme="dark"] .text-red-800 {
   box-shadow: inset 0 0 0 1px rgb(255 255 255 / 22%);
 }
 
-.session-bar-open {
+.session-bar-inferred {
   background: linear-gradient(90deg, var(--teal), var(--good));
 }
 

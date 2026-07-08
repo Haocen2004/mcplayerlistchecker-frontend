@@ -49,6 +49,17 @@ export interface PlayerSession {
   start: string;
   end: string;
   open: boolean;
+  inferred: boolean;
+}
+
+export interface ServerCatalog {
+  servers: string[];
+  latestServer: string | null;
+}
+
+export interface DataBounds {
+  start: string | null;
+  end: string | null;
 }
 
 export interface LiveMessage {

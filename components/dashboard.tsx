@@ -32,7 +32,9 @@ const ranges = [
   { value: "15m", label: "15 分钟" },
   { value: "1h", label: "1 小时" },
   { value: "6h", label: "6 小时" },
+  { value: "12h", label: "12 小时" },
   { value: "24h", label: "24 小时" },
+  { value: "3d", label: "3 天" },
   { value: "7d", label: "7 天" },
   { value: "custom", label: "指定时间" }
 ];
@@ -66,6 +68,8 @@ export function Dashboard() {
   const [events, setEvents] = useState<PlayerEvent[]>([]);
   const [sessions, setSessions] = useState<PlayerSession[]>([]);
   const [dataWindow, setDataWindow] = useState<{ start: string; end: string } | null>(null);
+  const [availableWindow, setAvailableWindow] = useState<{ start: string; end: string } | null>(null);
+  const [serversReady, setServersReady] = useState(false);
   const [historyError, setHistoryError] = useState("");
   const [loadingHistory, setLoadingHistory] = useState(false);
   const reconnectTimer = useRef<number | null>(null);
@@ -86,8 +90,14 @@ export function Dashboard() {
   }, []);
 
   useEffect(() => {
+    if (!serversReady) return;
     loadHistory();
-  }, [range, bucket, selectedServer, customStart, customEnd]);
+  }, [serversReady, range, bucket, selectedServer, customStart, customEnd]);
+
+  useEffect(() => {
+    if (!serversReady || range !== "custom") return;
+    loadAvailableWindow();
+  }, [serversReady, range, selectedServer]);
 
   useEffect(() => {
     loadHistoryRef.current = loadHistory;
@@ -186,10 +196,39 @@ export function Dashboard() {
   }
 
   async function loadServers() {
-    const response = await fetch("/api/servers", { cache: "no-store" });
+    try {
+      const response = await fetch("/api/servers", { cache: "no-store" });
+      if (!response.ok) return;
+      const body = await response.json();
+      if (!body.ok) return;
+
+      if (Array.isArray(body.data)) {
+        setServers(body.data);
+      } else if (body.data && Array.isArray(body.data.servers)) {
+        setServers(body.data.servers);
+        if (body.data.latestServer) setSelectedServer(body.data.latestServer);
+      }
+    } finally {
+      setServersReady(true);
+    }
+  }
+
+  async function loadAvailableWindow() {
+    const query = new URLSearchParams();
+    if (selectedServer) query.set("server", selectedServer);
+    const response = await fetch(`/api/bounds?${query}`, { cache: "no-store" });
     if (!response.ok) return;
     const body = await response.json();
-    if (body.ok && Array.isArray(body.data)) setServers(body.data);
+    if (!body.ok || !body.data?.start || !body.data?.end) {
+      setAvailableWindow(null);
+      return;
+    }
+
+    const nextWindow = { start: body.data.start, end: body.data.end };
+    setAvailableWindow(nextWindow);
+    const nextRange = clampInputRange(customStart, customEnd, nextWindow.start, nextWindow.end);
+    setCustomStart(nextRange.start);
+    setCustomEnd(nextRange.end);
   }
 
   async function loadHistory(options: { silent?: boolean } = {}) {
@@ -398,6 +437,8 @@ export function Dashboard() {
                 <input
                   type="datetime-local"
                   value={customStart}
+                  min={availableWindow ? toInputDateTime(new Date(availableWindow.start)) : undefined}
+                  max={availableWindow ? toInputDateTime(new Date(availableWindow.end)) : undefined}
                   onChange={event => setCustomStart(event.target.value)}
                   className="h-9 rounded-md border border-slate-300 bg-white px-2 text-sm"
                   aria-label="开始时间"
@@ -405,6 +446,8 @@ export function Dashboard() {
                 <input
                   type="datetime-local"
                   value={customEnd}
+                  min={availableWindow ? toInputDateTime(new Date(availableWindow.start)) : undefined}
+                  max={availableWindow ? toInputDateTime(new Date(availableWindow.end)) : undefined}
                   onChange={event => setCustomEnd(event.target.value)}
                   className="h-9 rounded-md border border-slate-300 bg-white px-2 text-sm"
                   aria-label="结束时间"
@@ -604,11 +647,11 @@ function OnlineSessionsChart({
                 const sessionEnd = Math.min(new Date(session.end).getTime(), endMs);
                 const left = ((sessionStart - startMs) / spanMs) * 100;
                 const width = Math.max(((sessionEnd - sessionStart) / spanMs) * 100, 0.5);
-                const title = `${group.label}\n${formatDateTime(session.start)} - ${formatDateTime(session.end)}\n${formatDuration(sessionEnd - sessionStart)}${session.open ? "，仍在线" : ""}`;
+                const title = `${group.label}\n${formatDateTime(session.start)} - ${formatDateTime(session.end)}\n${formatDuration(sessionEnd - sessionStart)}${session.inferred ? "，退出时间由在线人数推断" : ""}`;
                 return (
                   <span
                     key={session.id}
-                    className={session.open ? "session-bar session-bar-open" : "session-bar"}
+                    className={session.inferred ? "session-bar session-bar-inferred" : "session-bar"}
                     style={{ left: `${left}%`, width: `${width}%` }}
                     title={title}
                   />
@@ -701,4 +744,29 @@ function buildTicks(startMs: number, endMs: number, count: number) {
 function toInputDateTime(date: Date) {
   const offsetMs = date.getTimezoneOffset() * 60_000;
   return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
+}
+
+function clampInputRange(startValue: string, endValue: string, minIso: string, maxIso: string) {
+  const min = new Date(minIso).getTime();
+  const max = new Date(maxIso).getTime();
+  const fallbackSpan = Math.min(60 * 60_000, Math.max(max - min, 0));
+  let start = new Date(startValue).getTime();
+  let end = new Date(endValue).getTime();
+
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start >= end) {
+    end = max;
+    start = Math.max(min, end - fallbackSpan);
+  } else {
+    start = Math.min(Math.max(start, min), max);
+    end = Math.min(Math.max(end, min), max);
+    if (start >= end) {
+      end = Math.min(max, start + fallbackSpan);
+      start = Math.max(min, end - fallbackSpan);
+    }
+  }
+
+  return {
+    start: toInputDateTime(new Date(start)),
+    end: toInputDateTime(new Date(end))
+  };
 }

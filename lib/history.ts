@@ -1,12 +1,14 @@
 import type { Document } from "mongodb";
 import { getDb } from "./mongo";
-import type { HistoryPoint, PlayerEvent, PlayerSession } from "./types";
+import type { DataBounds, HistoryPoint, PlayerEvent, PlayerSession, ServerCatalog } from "./types";
 
 const RANGES = {
   "15m": 15 * 60 * 1000,
   "1h": 60 * 60 * 1000,
   "6h": 6 * 60 * 60 * 1000,
+  "12h": 12 * 60 * 60 * 1000,
   "24h": 24 * 60 * 60 * 1000,
+  "3d": 3 * 24 * 60 * 60 * 1000,
   "7d": 7 * 24 * 60 * 60 * 1000
 } as const;
 
@@ -65,8 +67,12 @@ export function normalizeBucket(value: string | null, window: TimeWindow): keyof
       return "1m";
     case "6h":
       return "5m";
+    case "12h":
+      return "15m";
     case "24h":
       return "15m";
+    case "3d":
+      return "1h";
     case "7d":
       return "1h";
   }
@@ -168,7 +174,7 @@ export async function getPlayerSessions(params: {
   const serverMatch: Document = {};
   if (params.server) serverMatch.server = params.server;
 
-  const [beforeRows, windowRows] = await Promise.all([
+  const [beforeRows, windowRows, historyRows] = await Promise.all([
     db.collection("logs")
       .find({ ...serverMatch, timestamp: { $lt: params.window.start } }, {
         projection: {
@@ -194,6 +200,17 @@ export async function getPlayerSessions(params: {
       })
       .sort({ timestamp: 1 })
       .limit(10000)
+      .toArray(),
+    db.collection("history")
+      .find({ ...serverMatch, timestamp: { $gte: params.window.start, $lte: params.window.end } }, {
+        projection: {
+          timestamp: 1,
+          playerCount: 1,
+          server: 1
+        }
+      })
+      .sort({ timestamp: 1 })
+      .limit(20000)
       .toArray()
   ]);
 
@@ -243,13 +260,11 @@ export async function getPlayerSessions(params: {
 
     const session = active.get(key);
     if (!session) continue;
-    sessions.push(toPlayerSession(session, event.timestamp, false));
+    sessions.push(toPlayerSession(session, event.timestamp, { open: false, inferred: false }));
     active.delete(key);
   }
 
-  for (const session of active.values()) {
-    sessions.push(toPlayerSession(session, params.window.end, true));
-  }
+  sessions.push(...inferMissingSessions(Array.from(active.values()), historyRows));
 
   return sessions
     .filter(session => new Date(session.end) > new Date(session.start))
@@ -260,15 +275,62 @@ export async function getPlayerSessions(params: {
     });
 }
 
-export async function getServers(): Promise<string[]> {
+export async function getServers(): Promise<ServerCatalog> {
   const db = await getDb();
-  const [historyServers, logServers] = await Promise.all([
+  const [historyServers, logServers, latest] = await Promise.all([
     db.collection("history").distinct("server", { server: { $type: "string", $ne: "" } }),
-    db.collection("logs").distinct("server", { server: { $type: "string", $ne: "" } })
+    db.collection("logs").distinct("server", { server: { $type: "string", $ne: "" } }),
+    db.collection("history")
+      .find({ server: { $type: "string", $ne: "" } }, { projection: { server: 1 } })
+      .sort({ timestamp: -1 })
+      .limit(1)
+      .next()
   ]);
 
-  return Array.from(new Set([...historyServers, ...logServers].map(String)))
-    .sort((a, b) => a.localeCompare(b));
+  return {
+    servers: Array.from(new Set([...historyServers, ...logServers].map(String)))
+      .sort((a, b) => a.localeCompare(b)),
+    latestServer: latest?.server ? String(latest.server) : null
+  };
+}
+
+export async function getDataBounds(server?: string | null): Promise<DataBounds> {
+  const db = await getDb();
+  const match: Document = {};
+  if (server) match.server = server;
+
+  const [oldestHistory, latestHistory, oldestLog, latestLog] = await Promise.all([
+    db.collection("history")
+      .find(match, { projection: { timestamp: 1 } })
+      .sort({ timestamp: 1 })
+      .limit(1)
+      .next(),
+    db.collection("history")
+      .find(match, { projection: { timestamp: 1 } })
+      .sort({ timestamp: -1 })
+      .limit(1)
+      .next(),
+    db.collection("logs")
+      .find(match, { projection: { timestamp: 1 } })
+      .sort({ timestamp: 1 })
+      .limit(1)
+      .next(),
+    db.collection("logs")
+      .find(match, { projection: { timestamp: 1 } })
+      .sort({ timestamp: -1 })
+      .limit(1)
+      .next()
+  ]);
+
+  const starts = [toDate(oldestHistory?.timestamp), toDate(oldestLog?.timestamp)]
+    .filter((date): date is Date => Boolean(date));
+  const ends = [toDate(latestHistory?.timestamp), toDate(latestLog?.timestamp)]
+    .filter((date): date is Date => Boolean(date));
+
+  return {
+    start: starts.length ? new Date(Math.min(...starts.map(date => date.getTime()))).toISOString() : null,
+    end: ends.length ? new Date(Math.max(...ends.map(date => date.getTime()))).toISOString() : null
+  };
 }
 
 function isRange(value: string | null): value is RangeKey {
@@ -365,7 +427,7 @@ function eventKey(row: Document | { uuid: string; server: string }): string | nu
 function toPlayerSession(
   session: { uuid: string; username: string; server: string; start: Date },
   end: Date,
-  open: boolean
+  options: { open: boolean; inferred: boolean }
 ): PlayerSession {
   return {
     id: `${session.server}:${session.uuid}:${session.start.getTime()}:${end.getTime()}`,
@@ -374,6 +436,42 @@ function toPlayerSession(
     server: session.server,
     start: session.start.toISOString(),
     end: end.toISOString(),
-    open
+    open: options.open,
+    inferred: options.inferred
   };
+}
+
+function inferMissingSessions(
+  sessions: Array<{ uuid: string; username: string; server: string; start: Date }>,
+  rows: Document[]
+): PlayerSession[] {
+  const dropTimesByServer = new Map<string, Date[]>();
+  for (const row of rows) {
+    const server = String(row.server || "default");
+    const timestamp = toDate(row.timestamp);
+    const playerCount = toNumber(row.playerCount);
+    if (!timestamp || playerCount === null) continue;
+
+    const samples = dropTimesByServer.get(server) || [];
+    const previousCount = (samples as Array<Date> & { lastCount?: number }).lastCount;
+    if (previousCount !== undefined && playerCount < previousCount) {
+      const dropCount = Math.max(1, Math.round(previousCount - playerCount));
+      for (let index = 0; index < dropCount; index += 1) {
+        samples.push(timestamp);
+      }
+    }
+    (samples as Array<Date> & { lastCount?: number }).lastCount = playerCount;
+    dropTimesByServer.set(server, samples);
+  }
+
+  return sessions
+    .sort((left, right) => left.start.getTime() - right.start.getTime())
+    .flatMap(session => {
+      const dropTimes = dropTimesByServer.get(session.server) || [];
+      const dropIndex = dropTimes.findIndex(timestamp => timestamp > session.start);
+      if (dropIndex === -1) return [];
+
+      const [end] = dropTimes.splice(dropIndex, 1);
+      return [toPlayerSession(session, end, { open: false, inferred: true })];
+    });
 }
