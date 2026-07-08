@@ -14,6 +14,7 @@
 
 ```bash
 pnpm install
+rm -rf .next
 pnpm build
 pnpm start
 ```
@@ -46,3 +47,6 @@ FRONTEND_COOKIE_SECURE=false
 `FRONTEND_COOKIE_SECURE=true` 只应在 HTTPS 部署时启用。本地 HTTP 调试保持 `false`。
 
 如果不设置 `FRONTEND_JWT_SECRET`，应用会在首次启动时生成 `.frontend_jwt_secret`。这个文件必须保留并保持私密；删除后已有登录态会全部失效。
+
+升级部署时务必删除旧 `.next` 后重新构建。样式文件由 Tailwind 在 `pnpm build` 时生成，如果继续使用旧 `.next`，页面会出现无样式或布局错乱。
+当前构建会自动校验 Tailwind utilities 是否生成；如果服务器缺少正确的 PostCSS/Tailwind 配置，`pnpm build` 会直接失败。

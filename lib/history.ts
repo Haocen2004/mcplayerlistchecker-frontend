@@ -75,43 +75,58 @@ export async function getHistory(params: {
 
   const bucketMs = BUCKETS[params.bucket];
   const rows = await db.collection("history")
-    .aggregate([
-      { $match: match },
-      {
-        $addFields: {
-          bucketTime: {
-            $toDate: {
-              $subtract: [
-                { $toLong: "$timestamp" },
-                { $mod: [{ $toLong: "$timestamp" }, bucketMs] }
-              ]
-            }
-          },
-          tpsNum: { $convert: { input: "$tps", to: "double", onError: null, onNull: null } },
-          msptNum: { $convert: { input: "$mspt", to: "double", onError: null, onNull: null } },
-          playerCountNum: { $convert: { input: "$playerCount", to: "double", onError: null, onNull: null } }
-        }
-      },
-      {
-        $group: {
-          _id: "$bucketTime",
-          tps: { $avg: "$tpsNum" },
-          mspt: { $avg: "$msptNum" },
-          playerCount: { $avg: "$playerCountNum" },
-          samples: { $sum: 1 }
-        }
-      },
-      { $sort: { _id: 1 } }
-    ])
+    .find(match, {
+      projection: {
+        timestamp: 1,
+        tps: 1,
+        mspt: 1,
+        playerCount: 1
+      }
+    })
+    .sort({ timestamp: 1 })
     .toArray();
 
-  return rows.map(row => ({
-    timestamp: (row._id as Date).toISOString(),
-    tps: roundOrNull(row.tps),
-    mspt: roundOrNull(row.mspt),
-    playerCount: roundOrNull(row.playerCount),
-    samples: row.samples
-  }));
+  const buckets = new Map<number, {
+    samples: number;
+    tpsSum: number;
+    tpsCount: number;
+    msptSum: number;
+    msptCount: number;
+    playerCountSum: number;
+    playerCountCount: number;
+  }>();
+
+  for (const row of rows) {
+    const timestamp = toDate(row.timestamp);
+    if (!timestamp) continue;
+
+    const bucketTime = Math.floor(timestamp.getTime() / bucketMs) * bucketMs;
+    const current = buckets.get(bucketTime) || {
+      samples: 0,
+      tpsSum: 0,
+      tpsCount: 0,
+      msptSum: 0,
+      msptCount: 0,
+      playerCountSum: 0,
+      playerCountCount: 0
+    };
+
+    current.samples += 1;
+    addNumber(current, "tps", row.tps);
+    addNumber(current, "mspt", row.mspt);
+    addNumber(current, "playerCount", row.playerCount);
+    buckets.set(bucketTime, current);
+  }
+
+  return Array.from(buckets.entries())
+    .sort(([left], [right]) => left - right)
+    .map(([timestamp, bucket]) => ({
+      timestamp: new Date(timestamp).toISOString(),
+      tps: averageOrNull(bucket.tpsSum, bucket.tpsCount),
+      mspt: averageOrNull(bucket.msptSum, bucket.msptCount),
+      playerCount: averageOrNull(bucket.playerCountSum, bucket.playerCountCount),
+      samples: bucket.samples
+    }));
 }
 
 export async function getEvents(params: {
@@ -174,4 +189,54 @@ function autoBucketForSpan(spanMs: number): keyof typeof BUCKETS {
 function roundOrNull(value: unknown): number | null {
   if (typeof value !== "number" || Number.isNaN(value)) return null;
   return Math.round(value * 100) / 100;
+}
+
+function toDate(value: unknown): Date | null {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
+  if (typeof value === "string" || typeof value === "number") {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+  return null;
+}
+
+function toNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number.parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function addNumber(
+  bucket: {
+    tpsSum: number;
+    tpsCount: number;
+    msptSum: number;
+    msptCount: number;
+    playerCountSum: number;
+    playerCountCount: number;
+  },
+  key: "tps" | "mspt" | "playerCount",
+  value: unknown
+) {
+  const parsed = toNumber(value);
+  if (parsed === null) return;
+
+  if (key === "tps") {
+    bucket.tpsSum += parsed;
+    bucket.tpsCount += 1;
+  } else if (key === "mspt") {
+    bucket.msptSum += parsed;
+    bucket.msptCount += 1;
+  } else {
+    bucket.playerCountSum += parsed;
+    bucket.playerCountCount += 1;
+  }
+}
+
+function averageOrNull(sum: number, count: number): number | null {
+  if (count === 0) return null;
+  return Math.round((sum / count) * 100) / 100;
 }
