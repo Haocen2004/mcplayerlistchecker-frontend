@@ -27,6 +27,7 @@ const server = createServer((req, res) => {
     return;
   }
 
+  installNoStoreHeader(res);
   const parsedUrl = req.url ? parse(req.url, true) : undefined;
   return handle(req, res, parsedUrl);
 });
@@ -44,6 +45,26 @@ server.listen(config.port, () => {
   console.log(`Frontend listening on http://localhost:${config.port}`);
 });
 
+function installNoStoreHeader(res: import("node:http").ServerResponse) {
+  const cacheControl = "no-store, max-age=0";
+  const writeHead = res.writeHead.bind(res);
+
+  res.setHeader("Cache-Control", cacheControl);
+  res.writeHead = ((statusCode: number, statusMessageOrHeaders?: any, headers?: any) => {
+    if (typeof statusMessageOrHeaders === "string") {
+      return writeHead(statusCode, statusMessageOrHeaders, {
+        ...headers,
+        "Cache-Control": cacheControl
+      });
+    }
+
+    return writeHead(statusCode, {
+      ...statusMessageOrHeaders,
+      "Cache-Control": cacheControl
+    });
+  }) as typeof res.writeHead;
+}
+
 function serveNextStatic(url: string, res: import("node:http").ServerResponse) {
   const relativePath = decodeURIComponent(url.replace(/^\/_next\/static\/?/, ""));
   const filePath = path.resolve(nextStaticDir, relativePath);
@@ -56,11 +77,7 @@ function serveNextStatic(url: string, res: import("node:http").ServerResponse) {
 
   fs.stat(filePath, (statError, stats) => {
     if (statError || !stats.isFile()) {
-      const fallbackPath = fallbackStaticPath(filePath);
-      if (fallbackPath) {
-        res.setHeader("Content-Type", contentType(fallbackPath));
-        res.setHeader("Cache-Control", "no-cache");
-        fs.createReadStream(fallbackPath).pipe(res);
+      if (serveStaticFallback(filePath, res)) {
         return;
       }
 
@@ -75,9 +92,16 @@ function serveNextStatic(url: string, res: import("node:http").ServerResponse) {
   });
 }
 
-function fallbackStaticPath(filePath: string): string | null {
+function serveStaticFallback(filePath: string, res: import("node:http").ServerResponse): boolean {
   const ext = path.extname(filePath);
-  if (ext !== ".css") return null;
+  if (ext === ".js") {
+    res.setHeader("Content-Type", "application/javascript; charset=utf-8");
+    res.setHeader("Cache-Control", "no-store, max-age=0");
+    res.end(reloadScript());
+    return true;
+  }
+
+  if (ext !== ".css") return false;
 
   const cssDir = path.join(nextStaticDir, "css");
   try {
@@ -87,10 +111,34 @@ function fallbackStaticPath(filePath: string): string | null {
       .filter(file => fs.statSync(file).isFile())
       .sort((left, right) => fs.statSync(right).mtimeMs - fs.statSync(left).mtimeMs);
 
-    return candidates[0] || null;
+    if (!candidates[0]) return false;
+
+    res.setHeader("Content-Type", contentType(candidates[0]));
+    res.setHeader("Cache-Control", "no-cache");
+    fs.createReadStream(candidates[0]).pipe(res);
+    return true;
   } catch {
-    return null;
+    return false;
   }
+}
+
+function reloadScript() {
+  return `
+(function () {
+  try {
+    var key = "mc-dashboard-static-reload";
+    var now = Date.now();
+    var last = Number(sessionStorage.getItem(key) || "0");
+    if (now - last < 5000) return;
+    sessionStorage.setItem(key, String(now));
+    var url = new URL(window.location.href);
+    url.searchParams.set("_reload", String(now));
+    window.location.replace(url.toString());
+  } catch (error) {
+    window.location.reload();
+  }
+})();
+`;
 }
 
 function contentType(filePath: string) {
