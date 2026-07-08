@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 import { fileURLToPath, parse } from "node:url";
 import path from "node:path";
+import fs from "node:fs";
 import next from "next";
 import { handleLiveUpgrade } from "./lib/live-server";
 import { getFrontendConfig } from "./lib/config";
@@ -16,10 +17,16 @@ const app = next({
   port: config.port
 } as any);
 const handle = app.getRequestHandler();
+const nextStaticDir = path.join(appDir, ".next", "static");
 
 await app.prepare();
 
 const server = createServer((req, res) => {
+  if (req.url?.startsWith("/_next/static/")) {
+    serveNextStatic(req.url, res);
+    return;
+  }
+
   const parsedUrl = req.url ? parse(req.url, true) : undefined;
   return handle(req, res, parsedUrl);
 });
@@ -36,3 +43,38 @@ server.on("upgrade", (req, socket, head) => {
 server.listen(config.port, () => {
   console.log(`Frontend listening on http://localhost:${config.port}`);
 });
+
+function serveNextStatic(url: string, res: import("node:http").ServerResponse) {
+  const relativePath = decodeURIComponent(url.replace(/^\/_next\/static\/?/, ""));
+  const filePath = path.resolve(nextStaticDir, relativePath);
+
+  if (!filePath.startsWith(nextStaticDir + path.sep)) {
+    res.statusCode = 403;
+    res.end("Forbidden");
+    return;
+  }
+
+  fs.stat(filePath, (statError, stats) => {
+    if (statError || !stats.isFile()) {
+      res.statusCode = 404;
+      res.end("Not found");
+      return;
+    }
+
+    res.setHeader("Content-Type", contentType(filePath));
+    res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    fs.createReadStream(filePath).pipe(res);
+  });
+}
+
+function contentType(filePath: string) {
+  if (filePath.endsWith(".css")) return "text/css; charset=utf-8";
+  if (filePath.endsWith(".js")) return "application/javascript; charset=utf-8";
+  if (filePath.endsWith(".map")) return "application/json; charset=utf-8";
+  if (filePath.endsWith(".woff2")) return "font/woff2";
+  if (filePath.endsWith(".woff")) return "font/woff";
+  if (filePath.endsWith(".png")) return "image/png";
+  if (filePath.endsWith(".jpg") || filePath.endsWith(".jpeg")) return "image/jpeg";
+  if (filePath.endsWith(".svg")) return "image/svg+xml";
+  return "application/octet-stream";
+}
