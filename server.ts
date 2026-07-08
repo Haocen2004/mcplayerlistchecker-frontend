@@ -56,6 +56,14 @@ function serveNextStatic(url: string, res: import("node:http").ServerResponse) {
 
   fs.stat(filePath, (statError, stats) => {
     if (statError || !stats.isFile()) {
+      const fallbackPath = fallbackStaticPath(filePath);
+      if (fallbackPath) {
+        res.setHeader("Content-Type", contentType(fallbackPath));
+        res.setHeader("Cache-Control", "no-cache");
+        fs.createReadStream(fallbackPath).pipe(res);
+        return;
+      }
+
       res.statusCode = 404;
       res.end("Not found");
       return;
@@ -65,6 +73,24 @@ function serveNextStatic(url: string, res: import("node:http").ServerResponse) {
     res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
     fs.createReadStream(filePath).pipe(res);
   });
+}
+
+function fallbackStaticPath(filePath: string): string | null {
+  const ext = path.extname(filePath);
+  if (ext !== ".css") return null;
+
+  const cssDir = path.join(nextStaticDir, "css");
+  try {
+    const candidates = fs.readdirSync(cssDir)
+      .filter(file => file.endsWith(".css"))
+      .map(file => path.join(cssDir, file))
+      .filter(file => fs.statSync(file).isFile())
+      .sort((left, right) => fs.statSync(right).mtimeMs - fs.statSync(left).mtimeMs);
+
+    return candidates[0] || null;
+  } catch {
+    return null;
+  }
 }
 
 function contentType(filePath: string) {
