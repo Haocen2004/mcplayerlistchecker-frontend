@@ -174,7 +174,7 @@ export async function getPlayerSessions(params: {
   const serverMatch: Document = {};
   if (params.server) serverMatch.server = params.server;
 
-  const [beforeRows, windowRows, historyRows] = await Promise.all([
+  const [beforeRows, windowRows, afterRows, historyRows] = await Promise.all([
     db.collection("logs")
       .find({ ...serverMatch, timestamp: { $lt: params.window.start } }, {
         projection: {
@@ -200,6 +200,19 @@ export async function getPlayerSessions(params: {
       })
       .sort({ timestamp: 1 })
       .limit(10000)
+      .toArray(),
+    db.collection("logs")
+      .find({ ...serverMatch, timestamp: { $gt: params.window.end } }, {
+        projection: {
+          type: 1,
+          uuid: 1,
+          username: 1,
+          server: 1,
+          timestamp: 1
+        }
+      })
+      .sort({ timestamp: 1 })
+      .limit(5000)
       .toArray(),
     db.collection("history")
       .find({ ...serverMatch, timestamp: { $gte: params.window.start, $lte: params.window.end } }, {
@@ -236,7 +249,7 @@ export async function getPlayerSessions(params: {
       uuid: normalized.uuid,
       username: normalized.username,
       server: normalized.server,
-      start: params.window.start
+      start: normalized.timestamp
     });
   }
 
@@ -257,6 +270,19 @@ export async function getPlayerSessions(params: {
       }
       continue;
     }
+
+    const session = active.get(key);
+    if (!session) continue;
+    sessions.push(toPlayerSession(session, event.timestamp, { open: false, inferred: false }));
+    active.delete(key);
+  }
+
+  for (const row of afterRows) {
+    const event = normalizeLogEvent(row);
+    if (!event) continue;
+
+    const key = eventKey(event)!;
+    if (event.type !== "leave") continue;
 
     const session = active.get(key);
     if (!session) continue;

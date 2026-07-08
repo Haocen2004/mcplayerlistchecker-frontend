@@ -410,9 +410,6 @@ export function Dashboard() {
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div>
             <h2 className="font-semibold">历史数据</h2>
-            <p className="text-sm text-slate-500">
-              TPS、MSPT 和在线人数来自 MongoDB history 集合；服务器筛选来自 DB server 字段
-            </p>
           </div>
           <div className="flex flex-wrap gap-2">
             <select
@@ -497,7 +494,6 @@ export function Dashboard() {
       <section className="grid gap-5 xl:grid-cols-3">
         <div className="panel p-4 xl:col-span-2">
           <h2 className="mb-3 font-semibold">当前在线玩家</h2>
-          <p className="mb-3 text-sm text-slate-500">实时列表来自当前 bot WebSocket 连接，不受历史服务器筛选影响</p>
           <div className="grid max-h-[420px] gap-2 overflow-auto md:grid-cols-2">
             {sortedPlayers.length ? sortedPlayers.map(player => (
               <div key={player.uuid} className="flex min-h-12 items-center justify-between rounded-md border border-slate-200 px-3">
@@ -622,7 +618,7 @@ function OnlineSessionsChart({
   const endMs = new Date(windowEnd).getTime();
   const spanMs = Math.max(endMs - startMs, 1);
   const groups = groupSessions(sessions, showServer);
-  const ticks = buildTicks(startMs, endMs, 6);
+  const ticks = buildTimeTicks(startMs, endMs);
 
   return (
     <div className="session-chart">
@@ -643,16 +639,16 @@ function OnlineSessionsChart({
             <div className="session-track">
               {ticks.map(tick => <span key={tick.value} className="session-grid-line" style={{ left: `${tick.left}%` }} />)}
               {group.sessions.map(session => {
-                const sessionStart = Math.max(new Date(session.start).getTime(), startMs);
-                const sessionEnd = Math.min(new Date(session.end).getTime(), endMs);
-                const left = ((sessionStart - startMs) / spanMs) * 100;
-                const width = Math.max(((sessionEnd - sessionStart) / spanMs) * 100, 0.5);
-                const title = `${group.label}\n${formatDateTime(session.start)} - ${formatDateTime(session.end)}\n${formatDuration(sessionEnd - sessionStart)}${session.inferred ? "，退出时间由在线人数推断" : ""}`;
+                const geometry = sessionGeometry(session, startMs, endMs);
+                if (!geometry) return null;
+
+                const durationMs = new Date(session.end).getTime() - new Date(session.start).getTime();
+                const title = `${group.label}\n${formatDateTime(session.start)} - ${formatDateTime(session.end)}\n${formatDuration(durationMs)}${session.inferred ? "，退出时间由在线人数推断" : ""}`;
                 return (
                   <span
                     key={session.id}
                     className={session.inferred ? "session-bar session-bar-inferred" : "session-bar"}
-                    style={{ left: `${left}%`, width: `${width}%` }}
+                    style={{ left: `${geometry.left}%`, width: `${geometry.width}%` }}
                     title={title}
                   />
                 );
@@ -730,15 +726,67 @@ function groupSessions(sessions: PlayerSession[], showServer: boolean) {
     .sort((left, right) => left.label.localeCompare(right.label));
 }
 
-function buildTicks(startMs: number, endMs: number, count: number) {
+function buildTimeTicks(startMs: number, endMs: number) {
   const spanMs = Math.max(endMs - startMs, 1);
-  return Array.from({ length: count }, (_, index) => {
-    const value = startMs + (spanMs * index) / (count - 1);
-    return {
+  const stepMs = tickStepForSpan(spanMs);
+  const firstTick = Math.ceil(startMs / stepMs) * stepMs;
+  const ticks: Array<{ value: number; left: number }> = [];
+
+  for (let value = firstTick; value <= endMs; value += stepMs) {
+    ticks.push({
       value,
       left: ((value - startMs) / spanMs) * 100
-    };
-  });
+    });
+  }
+
+  if (!ticks.length || ticks[0].value > startMs) {
+    ticks.unshift({
+      value: startMs,
+      left: 0
+    });
+  }
+
+  if (ticks[ticks.length - 1]?.value < endMs) {
+    ticks.push({
+      value: endMs,
+      left: 100
+    });
+  }
+
+  return ticks;
+}
+
+function tickStepForSpan(spanMs: number) {
+  const hour = 60 * 60_000;
+  const steps = [
+    15 * 60_000,
+    30 * 60_000,
+    hour,
+    2 * hour,
+    3 * hour,
+    6 * hour,
+    12 * hour,
+    24 * hour
+  ];
+
+  return steps.find(step => spanMs / step <= 14) || 24 * hour;
+}
+
+function sessionGeometry(session: PlayerSession, startMs: number, endMs: number) {
+  const spanMs = Math.max(endMs - startMs, 1);
+  const rawStart = new Date(session.start).getTime();
+  const rawEnd = new Date(session.end).getTime();
+  if (!Number.isFinite(rawStart) || !Number.isFinite(rawEnd)) return null;
+  if (rawEnd <= startMs || rawStart >= endMs || rawEnd <= rawStart) return null;
+
+  const renderStart = Math.max(rawStart, startMs - spanMs);
+  const renderEnd = Math.min(rawEnd, endMs + spanMs);
+  if (renderEnd <= renderStart) return null;
+
+  return {
+    left: ((renderStart - startMs) / spanMs) * 100,
+    width: Math.max(((renderEnd - renderStart) / spanMs) * 100, 0.5)
+  };
 }
 
 function toInputDateTime(date: Date) {
