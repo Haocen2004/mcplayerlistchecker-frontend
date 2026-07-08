@@ -69,6 +69,10 @@ export function Dashboard() {
   const [historyError, setHistoryError] = useState("");
   const [loadingHistory, setLoadingHistory] = useState(false);
   const reconnectTimer = useRef<number | null>(null);
+  const socketPollTimer = useRef<number | null>(null);
+  const liveHistoryTimer = useRef<number | null>(null);
+  const scheduledHistoryTimer = useRef<number | null>(null);
+  const loadHistoryRef = useRef<(options?: { silent?: boolean }) => Promise<void>>(async () => undefined);
 
   const serverName = status?.motd || "Minecraft Server";
   const sortedPlayers = useMemo(
@@ -84,6 +88,28 @@ export function Dashboard() {
   useEffect(() => {
     loadHistory();
   }, [range, bucket, selectedServer, customStart, customEnd]);
+
+  useEffect(() => {
+    loadHistoryRef.current = loadHistory;
+  });
+
+  useEffect(() => {
+    if (liveState !== "connected") {
+      if (liveHistoryTimer.current) window.clearInterval(liveHistoryTimer.current);
+      liveHistoryTimer.current = null;
+      return;
+    }
+
+    scheduleHistoryRefresh(0);
+    liveHistoryTimer.current = window.setInterval(() => {
+      void loadHistoryRef.current({ silent: true });
+    }, 10_000);
+
+    return () => {
+      if (liveHistoryTimer.current) window.clearInterval(liveHistoryTimer.current);
+      liveHistoryTimer.current = null;
+    };
+  }, [liveState]);
 
   useEffect(() => {
     const stored = localStorage.getItem("mc-dashboard-theme");
@@ -108,6 +134,13 @@ export function Dashboard() {
         setLiveState("connected");
         setLiveError("");
         socket?.send(JSON.stringify({ path: "/players" }));
+        scheduleHistoryRefresh(0);
+        if (socketPollTimer.current) window.clearInterval(socketPollTimer.current);
+        socketPollTimer.current = window.setInterval(() => {
+          if (socket?.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ path: "/players" }));
+          }
+        }, 10_000);
       };
 
       socket.onmessage = event => {
@@ -125,6 +158,8 @@ export function Dashboard() {
       socket.onclose = () => {
         if (cancelled) return;
         setLiveState("disconnected");
+        if (socketPollTimer.current) window.clearInterval(socketPollTimer.current);
+        socketPollTimer.current = null;
         reconnectTimer.current = window.setTimeout(connect, 3000);
       };
     }
@@ -134,6 +169,8 @@ export function Dashboard() {
     return () => {
       cancelled = true;
       if (reconnectTimer.current) window.clearTimeout(reconnectTimer.current);
+      if (socketPollTimer.current) window.clearInterval(socketPollTimer.current);
+      if (scheduledHistoryTimer.current) window.clearTimeout(scheduledHistoryTimer.current);
       socket?.close();
     };
   }, []);
@@ -155,8 +192,8 @@ export function Dashboard() {
     if (body.ok && Array.isArray(body.data)) setServers(body.data);
   }
 
-  async function loadHistory() {
-    setLoadingHistory(true);
+  async function loadHistory(options: { silent?: boolean } = {}) {
+    if (!options.silent) setLoadingHistory(true);
     setHistoryError("");
 
     try {
@@ -185,8 +222,15 @@ export function Dashboard() {
       setDataWindow(null);
       setHistoryError(error instanceof Error ? error.message : "历史数据读取失败");
     } finally {
-      setLoadingHistory(false);
+      if (!options.silent) setLoadingHistory(false);
     }
+  }
+
+  function scheduleHistoryRefresh(delay = 1200) {
+    if (scheduledHistoryTimer.current) window.clearTimeout(scheduledHistoryTimer.current);
+    scheduledHistoryTimer.current = window.setTimeout(() => {
+      void loadHistoryRef.current({ silent: true });
+    }, delay);
   }
 
   function buildHistoryQuery() {
@@ -205,17 +249,24 @@ export function Dashboard() {
     if (message.type === "liveConnection") {
       setLiveState(message.ok ? "connected" : "disconnected");
       setLiveError(message.error || "");
+      if (message.ok) scheduleHistoryRefresh(0);
+      if (!message.ok && socketPollTimer.current) {
+        window.clearInterval(socketPollTimer.current);
+        socketPollTimer.current = null;
+      }
       return;
     }
 
     if ((message.type === "init" || message.type === "players") && message.status) {
       setStatus(message.status);
       setPlayers(message.players || []);
+      scheduleHistoryRefresh(800);
       return;
     }
 
     if (message.type === "status" && isStatus(message.data)) {
       setStatus(message.data);
+      scheduleHistoryRefresh(800);
       return;
     }
 
@@ -226,7 +277,7 @@ export function Dashboard() {
         setStatus(statusNow => statusNow ? { ...statusNow, playersOnline: next.length } : statusNow);
         return next;
       });
-      void loadHistory();
+      scheduleHistoryRefresh(300);
       return;
     }
 
@@ -237,7 +288,7 @@ export function Dashboard() {
         setStatus(statusNow => statusNow ? { ...statusNow, playersOnline: next.length } : statusNow);
         return next;
       });
-      void loadHistory();
+      scheduleHistoryRefresh(300);
       return;
     }
 
